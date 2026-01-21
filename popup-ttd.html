@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTD Fast Autofill</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles-ttd.css">
+</head>
+
+<body>
+    <div class="container">
+
+        <!-- HEADER -->
+        <header class="header">
+            <div class="header-content">
+                <div class="branding">
+                    <span class="om-symbol">🕉️</span>
+                    <h1 class="app-title">TTD Fast Autofill</h1>
+                </div>
+                <button class="btn-icon settings-btn" id="settingsBtn" title="Settings">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path
+                            d="M17.43 10.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C12.46 2.18 12.25 2 12 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM10 13c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z" />
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- TAB NAVIGATION -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-view="master">
+                <span class="tab-icon">👨‍👩‍👧‍👦</span>
+                <span>Master Profiles</span>
+            </button>
+            <button class="tab-btn" data-view="single">
+                <span class="tab-icon">👤</span>
+                <span>Single Profiles</span>
+            </button>
+        </nav>
+
+        <!-- QUICK ACTIONS BAR -->
+        <div class="quick-actions">
+            <button class="action-btn" id="importBtn" title="Import Profiles">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 12L3 7l1.41-1.41L7 8.17V2h2v6.17l2.59-2.58L13 7l-5 5zM2 14h12v2H2v-2z" />
+                </svg>
+                Import
+            </button>
+            <button class="action-btn" id="exportBtn" title="Export Profiles">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 2l5 5-1.41 1.41L9 5.83V12H7V5.83L4.41 8.41 3 7l5-5zM2 14h12v2H2v-2z" />
+                </svg>
+                Export
+            </button>
+            <button class="action-btn" id="helpBtn" title="Keyboard Shortcuts">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path
+                        d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8zm1 13H7v-2h2v2zm2.07-7.75l-.9.92C9.45 6.9 9 7.5 9 9H7v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H4c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z" />
+                </svg>
+                Help
+            </button>
+        </div>
+
+        <!-- SEARCH BAR -->
+        <div class="search-container">
+            <svg class="search-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <path
+                    d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z" />
+            </svg>
+            <input type="text" class="search-input" id="searchInput" placeholder="Search profiles...">
+            <button class="btn-icon clear-search" id="clearSearch" title="Clear search">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path
+                        d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z" />
+                </svg>
+            </button>
+        </div>
+
+        <!-- MASTER PROFILES VIEW -->
+        <div id="masterView" class="profile-view active">
+            <div class="profile-header">
+                <h2 class="view-title">Master Profiles</h2>
+                <button class="btn-primary btn-sm" id="newMasterBtn">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                        <path d="M7 0v14M0 7h14" stroke="currentColor" stroke-width="2" />
+                    </svg>
+                    New Profileprofile
+                </button>
+            </div>
+
+            <!-- Profile Templates -->
+            <div class="templates-section" id="masterTemplates">
+                <p class="templates-label">Quick start:</p>
+                <div class="templates-grid">
+                    <button class="template-card" data-template="self">
+                        <span>👤</span>
+                        <span>Self Only</span>
+                    </button>
+                    <button class="template-card" data-template="couple">
+                        <span>👫</span>
+                        <span>Couple</span>
+                    </button>
+                    <button class="template-card" data-template="family4">
+                        <span>👨‍👩‍👧‍👦</span>
+                        <span>Family of 4</span>
+                    </button>
+                    <button class="template-card" data-template="family6">
+                        <span>👨‍👩‍👧‍👶👵👴</span>
+                        <span>Family of 6</span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="profile-list" id="masterProfileList">
+                <!-- Dynamic content -->
+            </div>
+        </div>
+
+        <!-- SINGLE PROFILES VIEW -->
+        <div id="singleView" class="profile-view">
+            <div class="profile-header">
+                <h2 class="view-title">Single Profiles</h2>
+                <button class="btn-primary btn-sm" id="newSingleBtn">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                        <path d="M7 0v14M0 7h14" stroke="currentColor" stroke-width="2" />
+                    </svg>
+                    New Profile
+                </button>
+            </div>
+
+            <div class="profile-list" id="singleProfileList">
+                <!-- Dynamic content -->
+            </div>
+        </div>
+
+        <!-- PROFILE EDITOR MODAL -->
+        <div id="editorModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="editorTitle">New Profile</h2>
+                    <button class="btn-icon close-modal" id="closeEditor">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                            <path
+                                d="M4.646 4.646a.5.5 0 0 1 .708 0L10 9.293l4.646-4.647a.5.5 0 0 1 .708.708L10.707 10l4.647 4.646a.5.5 0 0 1-.708.708L10 10.707l-4.646 4.647a.5.5 0 0 1-.708-.708L9.293 10 4.646 5.354a.5.5 0 0 1 0-.708z" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body" id="editorBody">
+                    <!-- Dynamic form content -->
+                </div>
+            </div>
+        </div>
+
+        <!-- SETTINGS MODAL -->
+        <div id="settingsModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Settings</h2>
+                    <button class="btn-icon close-modal" id="closeSettings">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                            <path
+                                d="M4.646 4.646a.5.5 0 0 1 .708 0L10 9.293l4.646-4.647a.5.5 0 0 1 .708.708L10.707 10l4.647 4.646a.5.5 0 0 1-.708.708L10 10.707l-4.646 4.647a.5.5 0 0 1-.708-.708L9.293 10 4.646 5.354a.5.5 0 0 1 0-.708z" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="setting-group">
+                        <label class="setting-label">
+                            <input type="checkbox" id="autoFillLastUsed">
+                            <span>Auto-fill with last used profile</span>
+                        </label>
+                        <p class="setting-desc">Automatically use the most recently filled profile when extension opens
+                        </p>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="setting-label">Keyboard Shortcuts</label>
+                        <div class="shortcut-list">
+                            <div class="shortcut-item">
+                                <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd>
+                                <span>Fill with last used</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>M</kbd>
+                                <span>Open Master Profiles</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd>
+                                <span>Open Single Profiles</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <button class="btn-secondary btn-block" id="clearAllData">Clear All Data</button>
+                        <p class="setting-desc warning">This will delete all profiles. Cannot be undone!</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- HELP MODAL -->
+        <div id="helpModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Help & Shortcuts</h2>
+                    <button class="btn-icon close-modal" id="closeHelp">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                            <path
+                                d="M4.646 4.646a.5.5 0 0 1 .708 0L10 9.293l4.646-4.647a.5.5 0 0 1 .708.708L10.707 10l4.647 4.646a.5.5 0 0 1-.708.708L10 10.707l-4.646 4.647a.5.5 0 0 1-.708-.708L9.293 10 4.646 5.354a.5.5 0 0 1 0-.708z" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="help-section">
+                        <h3>Getting Started</h3>
+                        <ol>
+                            <li>Create a profile with your pilgrim details</li>
+                            <li>Navigate to TTD booking page</li>
+                            <li>Click "Fill" to auto-complete the form</li>
+                        </ol>
+                    </div>
+
+                    <div class="help-section">
+                        <h3>Profile Types</h3>
+                        <p><strong>Master Profiles:</strong> For booking multiple pilgrims (up to 6) at once</p>
+                        <p><strong>Single Profiles:</strong> For individual pilgrim bookings</p>
+                    </div>
+
+                    <div class="help-section">
+                        <h3>Features</h3>
+                        <ul>
+                            <li>⭐ Star profiles to mark as favorites</li>
+                            <li>🔍 Search to quickly find profiles</li>
+                            <li>📥 Import/Export to backup your data</li>
+                            <li>⌨️ Use keyboard shortcuts for speed</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TOAST NOTIFICATIONS -->
+        <div id="toast" class="toast"></div>
+
+        <!-- FOOTER -->
+        <footer class="footer">
+            <p class="footer-text">Made with ❤️ for TTD devotees</p>
+            <p class="footer-version">v2.0.0</p>
+        </footer>
+
+    </div>
+
+    <script src="popup-ttd.js"></script>
+</body>
+
+</html>

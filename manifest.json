@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "TTD Fast Autofill - Tirumala Tirupati",
+  "short_name": "TTD Autofill",
+  "version": "2.0.0",
+  "description": "Fast, reliable form filling for TTD (Tirumala Tirupati Devasthanams) booking services. Save time with smart autofill for pilgrim details.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://ttdevasthanams.ap.gov.in/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ttdevasthanams.ap.gov.in/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup-ttd.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "commands": {
+    "fill-last-used": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+F",
+        "mac": "Command+Shift+F"
+      },
+      "description": "Fill with last used profile"
+    },
+    "open-master-profiles": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+M",
+        "mac": "Command+Shift+M"
+      },
+      "description": "Open Master Profiles"
+    },
+    "open-single-profiles": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Open Single Profiles"
+    }
+  }
+}

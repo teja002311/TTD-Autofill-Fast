@@ -1,0 +1,24 @@
+# Build artifacts
+*.zip
+release/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Documentation (optional - uncomment if you don't want these in repo)
+# DEPLOYMENT_GUIDE.md
+# SCREENSHOT_GUIDE.md
+# FOLDER_STRUCTURE.md
+# build-package.ps1
