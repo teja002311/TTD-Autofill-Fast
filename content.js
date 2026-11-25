@@ -1,685 +1,784 @@
-// Content Script - Core Autofill Engine
-// Handles smart field detection, React/Angular-safe value injection, and form filling
+// TTD Fast Autofill — content script
+//
+// TTD's booking site (Next.js/React) ignores values set by scripts: its inputs only accept
+// events where event.isTrusted === true. So this script works out WHAT to fill and WHERE,
+// and asks the background service worker to perform real keystrokes/clicks through the
+// Chrome debugger API (which produces trusted events). If that is unavailable it falls
+// back to classic script-based filling, which still works on older/unguarded forms.
 
-console.log('Fast Autofill content script loaded');
+(() => {
+    // When the extension is reloaded/updated, the old copy of this script stays in open tabs
+    // ("orphaned": chrome.* APIs gone) and background.js injects a fresh copy. A DOM marker
+    // (shared by all script worlds) tells each copy whether it is still the newest one.
+    const INSTANCE = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    document.documentElement.dataset.ttdafInstance = INSTANCE;
+    const isOrphaned = () => { try { return !chrome.runtime?.id; } catch (_) { return true; } };
+    const isCurrent = () => document.documentElement.dataset.ttdafInstance === INSTANCE && !isOrphaned();
 
-// Field mapping patterns for different sites and field types
-// EXPANDED WITH TTD-SPECIFIC PATTERNS
-const FIELD_PATTERNS = {
-    fullName: [
-        'fname', // TTD darshan booking pages use this
-        'name', 'pilgrimname', 'pilgrim_name', 'passengerName', 'passenger_name',
-        'fullname', 'full_name', 'pname', 'userName', 'user_name',
-        'devotee_name', 'devoteeName', 'personName', 'person_name'
-    ],
-    age: [
-        'age', 'pilgrimage', 'pilgrim_age', 'passengerAge', 'passenger_age',
-        'pAge', 'devotee_age', 'devoteeAge', 'personAge', 'person_age'
-    ],
-    gender: [
-        'gender', 'sex', 'pilgrimgender', 'pilgrim_gender',
-        'passengerGender', 'passenger_gender', 'pGender',
-        'devotee_gender', 'devoteeGender', 'personGender'
-    ],
-    phone: [
-        'phone', 'mobile', 'contact', 'phoneNumber', 'mobileNumber',
-        'phone_number', 'mobile_number', 'contactNumber', 'contact_number',
-        'mobileno', 'phoneno', 'cellphone'
-    ],
-    email: [
-        'email', 'mail', 'emailId', 'email_id', 'e_mail',
-        'emailaddress', 'email_address', 'mailid'
-    ],
-    idType: [
-        // CRITICAL: TTD field name is "photoIdType" which becomes "photoidtype" after toLowerCase
-        'photoidtype', 'photoidproof', 'photo_id_proof', 'photoIdProof', 'photoIdType',
-        'photo_id_type', 'idproof', 'id_proof', 'idType', 'id_type',
-        'idcard', 'id_card', 'documentType', 'document_type',
-        'prooftype', 'proof_type', 'identityType', 'identity_type'
-    ],
-    idNumber: [
-        // CRITICAL: TTD field name is "idProofNumber" which becomes "idproofnumber" after toLowerCase  
-        'idproofnumber', 'photoidnumber', 'photo_id_number', 'photoIdNumber', 'photoIdNo',
-        'photo_id_no', 'idnumber', 'id_number', 'idNo', 'id_no',
-        'idcard_no', 'documentNumber', 'document_number', 'cardNumber',
-        'card_number', 'proofnumber', 'proof_number', 'identityNumber',
-        'aadhaar', 'aadhar', 'pan', 'passport'
-    ],
-    address: [
-        'address', 'street', 'addr', 'address1', 'address_line',
-        'addressline1', 'streetaddress', 'street_address'
-    ],
-    city: [
-        'city', 'town', 'cityname', 'city_name', 'townname'
-    ],
-    state: [
-        'state', 'province', 'statename', 'state_name'
-    ],
-    pincode: [
-        'pincode', 'pin', 'zip', 'zipcode', 'postal', 'postalCode',
-        'postal_code', 'pinno', 'pin_code'
-    ],
-    country: [
-        'country', 'countryname', 'country_name', 'countryCode'
-    ]
-};
+    const LOG = (...a) => console.log('%c[TTD Autofill]', 'color:#FF9933;font-weight:bold', ...a);
 
-/**
- * Set value on an input element in a React/Angular-safe way
- * This triggers all necessary events that frameworks listen to
- */
-function setNativeValue(element, value) {
-    const { set: valueSetter } = Object.getOwnPropertyDescriptor(element, 'value') || {};
-    const prototype = Object.getPrototypeOf(element);
-    const { set: prototypeValueSetter } = Object.getOwnPropertyDescriptor(prototype, 'value') || {};
+    // ------------------------------------------------------------------
+    // Generic field patterns (fallback for pages that don't use TTD's names)
+    // ------------------------------------------------------------------
+    const FIELD_PATTERNS = {
+        fullName: ['fname', 'pilgrimname', 'pilgrim_name', 'fullname', 'full_name', 'devotee_name', 'devoteename', 'personname'],
+        age: ['age', 'pilgrim_age', 'devotee_age'],
+        gender: ['gender', 'sex'],
+        idType: ['photoidtype', 'photoidproof', 'photo_id_proof', 'idproof', 'id_proof', 'idtype', 'id_type', 'prooftype', 'documenttype'],
+        idNumber: ['idproofnumber', 'photoidnumber', 'photo_id_number', 'idnumber', 'id_number', 'proofnumber', 'documentnumber', 'aadhaar', 'aadhar'],
+        gothram: ['gothram', 'gotram', 'gotra'],
+        email: ['emailid', 'email', 'mailid'],
+        city: ['city', 'town'],
+        state: ['state', 'province'],
+        pincode: ['pincode', 'pin_code', 'zipcode', 'zip', 'postal']
+    };
 
-    if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
-        prototypeValueSetter.call(element, value);
-    } else if (valueSetter) {
-        valueSetter.call(element, value);
-    } else {
-        element.value = value;
-    }
+    // ------------------------------------------------------------------
+    // Small helpers
+    // ------------------------------------------------------------------
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    // Dispatch events that React/Angular listen to
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-    element.dispatchEvent(new Event('blur', { bubbles: true }));
-}
-
-/**
- * Check if a field name/id/attribute matches a field type pattern
- */
-function matchesPattern(fieldName, patterns) {
-    if (!fieldName) return false;
-    const lowerField = fieldName.toLowerCase();
-    return patterns.some(pattern => lowerField.includes(pattern));
-}
-
-/**
- * Get all relevant attributes from an element for matching
- */
-function getElementAttributes(element) {
-    return [
-        element.name,
-        element.id,
-        element.placeholder,
-        element.getAttribute('aria-label'),
-        element.getAttribute('formcontrolname'),
-        element.getAttribute('ng-reflect-name'),
-        element.getAttribute('data-field'),
-        element.getAttribute('data-name'),
-        element.className
-    ].filter(Boolean).join(' ');
-}
-
-/**
- * Safely set input value using native setter to trigger React/Angular events
- * Removes maxlength restriction to allow full value (fixes 12-digit number truncation)
- */
-function setNativeValue(element, value) {
-    // Remove maxlength restriction to allow full value (e.g., 12-digit Aadhaar numbers)
-    if (element.hasAttribute('maxlength')) {
-        element.removeAttribute('maxlength');
-    }
-
-    // Set value using native setter
-    element.value = value;
-
-    // Trigger all necessary events for React/Angular
-    const events = ['input', 'change', 'blur'];
-    events.forEach(eventType => {
-        element.dispatchEvent(new Event(eventType, { bubbles: true }));
-    });
-}
-
-/**
- * DEBUG FUNCTION: Detect all form fields on the page
- * Call this to see what fields exist and their attributes
- */
-function detectAllFields() {
-    console.log('🔍 DETECTING ALL FORM FIELDS ON PAGE...');
-    console.log('=====================================');
-
-    const allFields = document.querySelectorAll('input, select, textarea');
-    const fieldInfo = [];
-
-    allFields.forEach((field, index) => {
-        const info = {
-            index: index + 1,
-            type: field.tagName.toLowerCase(),
-            inputType: field.type || 'N/A',
-            name: field.name || 'N/A',
-            id: field.id || 'N/A',
-            formcontrolname: field.getAttribute('formcontrolname') || 'N/A',
-            'ng-reflect-name': field.getAttribute('ng-reflect-name') || 'N/A',
-            placeholder: field.placeholder || 'N/A',
-            'aria-label': field.getAttribute('aria-label') || 'N/A',
-            classList: field.className || 'N/A'
-        };
-
-        fieldInfo.push(info);
-        console.log(`Field #${info.index}:`, info);
-    });
-
-    console.log('=====================================');
-    console.log(`Total fields found: ${fieldInfo.length}`);
-    console.log('Copy this information and send to developer to add patterns!');
-
-    return fieldInfo;
-}
-
-/**
- * Find and fill a specific field type
- */
-function fillField(fieldType, value, container = document) {
-    if (!value) return false;
-
-    const patterns = FIELD_PATTERNS[fieldType];
-    if (!patterns) return false;
-
-    // Find all input/select elements
-    const elements = container.querySelectorAll('input, select, textarea');
-
-    for (const element of elements) {
-        const attributes = getElementAttributes(element);
-
-        if (matchesPattern(attributes, patterns)) {
-            // Handle select/dropdown elements
-            if (element.tagName === 'SELECT') {
-                fillSelect(element, value);
-                console.log(`✅ Filled ${fieldType} (SELECT):`, value);
-                return true;
-            }
-
-            // Handle radio buttons
-            if (element.type === 'radio') {
-                fillRadio(element, value);
-                console.log(`✅ Filled ${fieldType} (RADIO):`, value);
-                return true;
-            }
-
-            // Handle regular inputs
-            if (element.type !== 'submit' && element.type !== 'button') {
-                setNativeValue(element, value);
-                console.log(`✅ Filled ${fieldType} (INPUT):`, value);
-
-                // For gender and idType fields, also try Angular Material dropdown
-                // in case the input is actually a trigger for a custom dropdown
-                if (fieldType === 'gender' || fieldType === 'idType') {
-                    // Optimized timing: Gender 200ms, idType 600ms
-                    const delay = fieldType === 'idType' ? 600 : 200;
-                    setTimeout(() => fillAngularMaterialDropdown(element, value), delay);
-                }
-
-                return true;
-            }
+    async function waitFor(fn, timeout = 1500, interval = 20) {
+        const end = performance.now() + timeout;
+        for (;;) {
+            let v = null;
+            try { v = fn(); } catch (_) { /* ignore */ }
+            if (v) return v;
+            if (performance.now() > end) return null;
+            await sleep(interval);
         }
     }
 
-    console.log(`⚠️  Could not find field for ${fieldType}`);
-    return false;
-}
+    const isVisible = (el) => !!el && el.isConnected && el.getClientRects().length > 0 &&
+        getComputedStyle(el).visibility !== 'hidden';
 
-/**
- * Fill a select dropdown (standard HTML)
- */
-function fillSelect(selectElement, value) {
-    const valueStr = String(value).toLowerCase();
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/aadhar\b/g, 'aadhaar').replace(/[^a-z0-9]/g, '');
 
-    // Try to find matching option
-    for (const option of selectElement.options) {
-        const optionText = option.text.toLowerCase();
-        const optionValue = option.value.toLowerCase();
+    // ------------------------------------------------------------------
+    // Value cleaning — mirrors TTD's own validators so values are never rejected
+    // ------------------------------------------------------------------
+    const clean = {
+        // TTD: /^[a-zA-Z ]*$/ on change, /^[a-zA-Z][a-zA-Z ]{1,80}$/ on blur
+        name: (v) => String(v ?? '').replace(/[^a-zA-Z ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80),
+        age: (v) => String(v ?? '').replace(/\D/g, '').slice(0, 3),
+        letters: (v) => String(v ?? '').replace(/[^a-zA-Z ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 50),
+        digits: (v) => String(v ?? '').replace(/\D/g, ''),
+        text: (v) => String(v ?? '').trim()
+    };
 
-        if (optionText.includes(valueStr) || optionValue.includes(valueStr) ||
-            valueStr.includes(optionText) || valueStr.includes(optionValue)) {
-            selectElement.value = option.value;
-            setNativeValue(selectElement, option.value);
-            return true;
+    function normGender(g) {
+        const k = String(g ?? '').trim().toLowerCase();
+        return ({ m: 'Male', male: 'Male', f: 'Female', female: 'Female', t: 'Transgender', transgender: 'Transgender' })[k] || String(g ?? '').trim();
+    }
+
+    function normIdType(t) {
+        const k = String(t ?? '').toLowerCase();
+        if (/aadh?aa?r/.test(k)) return 'Aadhaar Card';
+        if (/passport/.test(k)) return 'Passport';
+        if (/voter/.test(k)) return 'Voter ID';
+        return String(t ?? '').trim();
+    }
+
+    function cleanIdNumber(idType, v) {
+        if (idType === 'Aadhaar Card') return clean.digits(v).slice(0, 12);
+        return String(v ?? '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 10);
+    }
+
+    // ------------------------------------------------------------------
+    // Trusted-input bridge (talks to background.js -> chrome.debugger)
+    // ------------------------------------------------------------------
+    const bridge = {
+        available: false,
+        async call(op, args = {}) {
+            const res = await chrome.runtime.sendMessage({ type: 'ttdaf:cdp', op, args });
+            if (!res || !res.ok) throw new Error(res?.error || 'No response from extension');
+            return res;
+        },
+        async start() {
+            try {
+                const r = await this.call('attach');
+                this.available = true;
+                // Chrome shows a "debugging this browser" bar on first attach, which shifts the
+                // page down. Give layout a moment to settle before measuring positions.
+                if (r.newlyAttached) await sleep(350);
+            } catch (e) {
+                if (/context invalidated/i.test(e.message)) throw e;
+                LOG('Real-keystroke mode unavailable, using compatibility mode:', e.message);
+                this.available = false;
+            }
+            return this.available;
+        },
+        async stop() {
+            if (!this.available) return;
+            this.available = false;
+            try { await this.call('detach'); } catch (_) { /* ignore */ }
+        }
+    };
+
+    // Classic script-based value setter (works on unguarded React/Angular forms)
+    function setNativeValue(el, value) {
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+            : el instanceof HTMLSelectElement ? HTMLSelectElement.prototype
+                : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(el, value); else el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function pointHits(el, x, y) {
+        const hit = document.elementFromPoint(x, y);
+        return !!hit && (hit === el || el.contains(hit));
+    }
+
+    async function realClick(el) {
+        let r = el.getBoundingClientRect();
+        const vw = window.innerWidth, vh = window.innerHeight;
+        if (r.top < 60 || r.bottom > vh - 10 || r.left < 0 || r.right > vw) {
+            el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+            r = el.getBoundingClientRect();
+        }
+        // Prefer the centre; if something overlaps it, try a few other points inside the box.
+        const candidates = [
+            [r.left + r.width / 2, r.top + r.height / 2],
+            [r.left + Math.min(12, r.width / 4), r.top + r.height / 2],
+            [r.left + r.width / 2, r.top + Math.min(10, r.height / 3)],
+            [r.right - Math.min(12, r.width / 4), r.top + r.height / 2]
+        ];
+        let hitPoint = candidates.find(([cx, cy]) => pointHits(el, cx, cy));
+        if (!hitPoint) {
+            // Covered (e.g. by a sticky header): bring it to the middle of the screen and retry.
+            el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+            r = el.getBoundingClientRect();
+            hitPoint = [r.left + r.width / 2, r.top + r.height / 2];
+        }
+        const [x, y] = hitPoint;
+        if (bridge.available) {
+            await bridge.call('click', { x: Math.round(x), y: Math.round(y) });
+        } else {
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
+            el.click();
         }
     }
 
-    return false;
-}
+    // ------------------------------------------------------------------
+    // Field actions
+    // ------------------------------------------------------------------
+    const valueMatches = (el, value) => String(el.value ?? '').trim() === String(value).trim();
 
-/**
- * Fill Angular Material dropdown (used by TTD)
- * These are custom dropdowns that need to be clicked to open
- */
-function fillAngularMaterialDropdown(inputElement, value) {
-    // KEEP ORIGINAL CAPITALIZATION - don't convert to lowercase!
-    const searchValue = String(value);
-    const searchValueLower = searchValue.toLowerCase();
+    async function typeValue(el, value) {
+        if (value === '' || value == null) return 'skip';
+        value = String(value);
+        if (valueMatches(el, value)) return 'ok';
+        if (el.disabled || el.readOnly) {
+            await waitFor(() => !el.disabled && !el.readOnly, 1500);
+            if (el.disabled || el.readOnly) return 'disabled';
+        }
 
-    console.log(`🔍 Attempting Angular Material dropdown fill for: ${searchValue}`);
+        if (!bridge.available) {
+            el.focus();
+            setNativeValue(el, value);
+            return (await waitFor(() => valueMatches(el, value), 300)) ? 'ok' : 'failed';
+        }
 
-    // For TTD dropdowns, try clicking the input field FIRST
-    // Only look for special triggers if input doesn't work
-    let trigger = inputElement;  // Start with input itself
-
-    console.log(`🎯 Will try clicking: ${trigger?.tagName}.${trigger?.className || 'no-class'}`);
-
-    if (trigger) {
-        // Click to open dropdown
-        trigger.click();
-        trigger.focus();
-        console.log(`🖱️ Clicked dropdown trigger`);
-
-        // Try to find and click options with RETRY logic
-        // Some dropdowns load options slowly, so we try multiple times
-        let attemptCount = 0;
-        const maxAttempts = 3;
-        const attemptIntervals = [300, 600, 1000]; // Try at 300ms, 600ms, 1000ms
-
-        function tryFindAndClickOption(attemptNumber) {
-            attemptCount++;
-            console.log(`🔄 Attempt #${attemptCount} to find dropdown options...`);
-
-            // Search for dropdown options
-            const options = document.querySelectorAll(
-                'mat-option, .mat-option, [role="option"], ' +
-                '.mat-select-panel mat-option, cdk-virtual-scroll-viewport mat-option, ' +
-                'div[role="listbox"] div, ul li, ' +
-                '.dropdown-item, .select-option'
-            );
-
-            console.log(`📋 Found ${options.length} potential dropdown options`);
-
-            // Filter to actual dropdown items
-            const dropdownOptions = Array.from(options).filter(opt => {
-                const classes = opt.className || '';
-                return classes.includes('floatingDropdown') ||
-                    classes.includes('listItem') ||
-                    classes.includes('mat-option') ||
-                    opt.getAttribute('role') === 'option';
-            });
-
-            console.log(`🎯 Filtered to ${dropdownOptions.length} actual dropdown options`);
-
-            // If we found options, try to match and click
-            if (dropdownOptions.length > 0) {
-                console.log('Available options:');
-                dropdownOptions.forEach((opt, idx) => {
-                    const text = opt.textContent?.trim() || '';
-                    console.log(`  ${idx + 1}. "${text}"`);
-                });
-
-                // Try exact match first
-                for (const option of dropdownOptions) {
-                    const optionText = option.textContent?.trim() || '';
-                    if (optionText === searchValue) {
-                        console.log(`✅ Found EXACT match: "${optionText}"`);
-                        option.click();
-                        setTimeout(() => console.log(`✅ Clicked: ${optionText}`), 50);
-                        return true;
-                    }
-                }
-
-                // Try case-insensitive exact
-                for (const option of dropdownOptions) {
-                    const optionText = option.textContent?.trim() || '';
-                    if (optionText.toLowerCase() === searchValueLower) {
-                        console.log(`✅ Found case-insensitive match: "${optionText}"`);
-                        option.click();
-                        setTimeout(() => console.log(`✅ Clicked: ${optionText}`), 50);
-                        return true;
-                    }
-                }
-
-                // Try starts-with
-                for (const option of dropdownOptions) {
-                    const optionText = option.textContent?.trim() || '';
-                    if (optionText.toLowerCase().startsWith(searchValueLower)) {
-                        console.log(`✅ Found starts-with match: "${optionText}"`);
-                        option.click();
-                        setTimeout(() => console.log(`✅ Clicked: ${optionText}`), 50);
-                        return true;
-                    }
-                }
-
-                // Try contains
-                for (const option of dropdownOptions) {
-                    const optionText = option.textContent?.trim() || '';
-                    if (optionText.toLowerCase().includes(searchValueLower)) {
-                        console.log(`✅ Found partial match: "${optionText}"`);
-                        option.click();
-                        setTimeout(() => console.log(`✅ Clicked: ${optionText}`), 50);
-                        return true;
-                    }
-                }
-
-                console.log(`⚠️ Options found but none matched: "${searchValue}"`);
-                document.body.click();
-                return false;
-            }
-
-            // No options found - try again if we haven't exceeded max attempts
-            if (attemptNumber < maxAttempts) {
-                console.log(`⏳ No options found yet, will retry in ${attemptIntervals[attemptNumber]}ms...`);
-                setTimeout(() => tryFindAndClickOption(attemptNumber + 1), attemptIntervals[attemptNumber]);
+        for (let attempt = 0; attempt < 2; attempt++) {
+            if (attempt === 0) {
+                el.focus({ preventScroll: false });
+                if (document.activeElement !== el) await realClick(el);
             } else {
-                console.log(`❌ Could not find dropdown options after ${maxAttempts} attempts`);
-                document.body.click();
-                return false;
+                await realClick(el);
             }
+            if (el.value) {
+                await bridge.call('selectAll');
+                if (attempt > 0) await bridge.call('key', { key: 'Backspace' });
+            }
+            await bridge.call('insertText', { text: value });
+            if (await waitFor(() => valueMatches(el, value), 400)) return 'ok';
         }
+        return 'failed';
+    }
 
-        // Start first attempt after a short delay
-        setTimeout(() => tryFindAndClickOption(0), attemptIntervals[0]);
+    // Options of a custom dropdown are rendered next to its input (TTD) or in a global overlay.
+    function findOptions(input) {
+        let node = input.parentElement;
+        for (let depth = 0; node && depth < 3; depth++, node = node.parentElement) {
+            const opts = [...node.querySelectorAll('li, [role="option"], mat-option')].filter(isVisible);
+            if (opts.length) return opts;
+        }
+        return [...document.querySelectorAll(
+            '.cdk-overlay-container mat-option, .cdk-overlay-container [role="option"], [role="listbox"] [role="option"]'
+        )].filter(isVisible);
+    }
 
+    function matchOption(options, wanted) {
+        const w = norm(wanted);
+        if (!w) return null;
+        const list = options.map((o) => ({ o, t: norm(o.textContent) })).filter((x) => x.t);
+        return (list.find((x) => x.t === w) ||
+            list.find((x) => x.t.startsWith(w)) ||
+            list.find((x) => x.t.includes(w)) ||
+            list.find((x) => w.includes(x.t)))?.o || null;
+    }
+
+    function fillNativeSelect(select, wanted) {
+        const w = norm(wanted);
+        const opt = [...select.options].find((o) => norm(o.text) === w || norm(o.value) === w) ||
+            [...select.options].find((o) => w && (norm(o.text).includes(w) || w.includes(norm(o.text))) && norm(o.text));
+        if (!opt) return false;
+        setNativeValue(select, opt.value);
         return true;
     }
 
-    console.log(`⚠️ Could not find dropdown trigger`);
-    return false;
-}
+    async function chooseOption(input, wanted) {
+        if (!wanted) return 'skip';
+        if (input.tagName === 'SELECT') return fillNativeSelect(input, wanted) ? 'ok' : 'nomatch';
+        if (norm(input.value) === norm(wanted)) return 'ok';
 
-/**
- * Fill radio button
-    const valueStr = String(value).toLowerCase();
-    const name = radioElement.name;
-    const radios = document.querySelectorAll(`input[type="radio"][name="${name}"]`);
+        for (let attempt = 0; attempt < 2; attempt++) {
+            await realClick(input);
+            const options = await waitFor(() => {
+                const o = findOptions(input);
+                return o.length ? o : null;
+            }, 1500);
+            if (!options) continue;
 
-    for (const radio of radios) {
-        const radioValue = (radio.value || radio.id || '').toLowerCase();
-        const radioLabel = radio.nextElementSibling?.textContent?.toLowerCase() || '';
-
-        if (radioValue.includes(valueStr) || valueStr.includes(radioValue) ||
-            radioLabel.includes(valueStr) || valueStr.includes(radioLabel)) {
-            radio.checked = true;
-            radio.dispatchEvent(new Event('change', { bubbles: true }));
-            radio.dispatchEvent(new Event('click', { bubbles: true }));
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/**
- * Main autofill function
- */
-function autofillForm(profileData) {
-    console.log('⚡ FAST AUTOFILL STARTING...');
-    console.log('Profile data:', profileData);
-    console.log('=====================================');
-
-    let filledCount = 0;
-    const startTime = performance.now();
-
-    // Fill General Details
-    if (fillField('email', profileData.email)) filledCount++;
-    if (fillField('city', profileData.city)) filledCount++;
-    if (fillField('state', profileData.state)) filledCount++;
-    if (fillField('country', profileData.country)) filledCount++;
-    if (fillField('pincode', profileData.pincode)) filledCount++;
-
-    // Fill Pilgrim Details
-    if (fillField('fullName', profileData.fullName)) filledCount++;
-    if (fillField('age', profileData.age)) filledCount++;
-    if (fillField('gender', profileData.gender)) filledCount++;
-
-    // Fill ID Type first, then ID Number ONLY if ID Type was filled
-    console.log(`🔍 Attempting to fill idType with value: "${profileData.idType}"`);
-    const idTypeFilled = fillField('idType', profileData.idType);
-    console.log(`📊 idType fill result: ${idTypeFilled}`);
-    if (idTypeFilled) {
-        filledCount++;
-        // Only fill ID Number if ID Type was successfully filled
-        if (profileData.idNumber) {
-            if (fillField('idNumber', profileData.idNumber)) filledCount++;
-        }
-    }
-
-    // Also try to fill ID Number even if ID Type wasn't filled (user can manually select dropdown)
-    if (!idTypeFilled && profileData.idNumber) {
-        // DON'T fill immediately - wait for Photo ID Proof dropdown first
-
-        // If we filled ID Number but not ID Type, try to auto-select the Photo ID Proof dropdown
-        // This uses same logic as Gender dropdown - click input and wait for options
-        if (profileData.idType) {
-            console.log(`🔄 Will attempt Photo ID Proof dropdown automation...`);
-            setTimeout(() => {
-                const idTypeInputs = document.querySelectorAll('input');
-                for (const inp of idTypeInputs) {
-                    const attrs = [inp.name, inp.id, inp.getAttribute('formcontrolname')].join('').toLowerCase();
-                    if (attrs.includes('photoidtype') || attrs.includes('idtype')) {
-                        fillAngularMaterialDropdown(inp, profileData.idType);
-
-                        // Fill ID Number AFTER dropdown selection completes
-                        setTimeout(() => {
-                            console.log(`🔢 Filling ID Number after Photo ID Proof selection...`);
-                            fillField('idNumber', profileData.idNumber);
-                        }, 400); // Fast: dropdown completes in 400ms
-                        break;
-                    }
-                }
-            }, 600); // Fast: Gender finishes by 600ms
-        }
-    }
-
-    const endTime = performance.now();
-    const duration = Math.round(endTime - startTime);
-
-    console.log('=====================================');
-    console.log(`✅ Autofill complete: ${filledCount} fields filled in ${duration}ms`);
-
-    // Show visual feedback
-    showNotification(`✓ Filled ${filledCount} fields in ${duration}ms`, 'success');
-
-    return filledCount;
-}
-
-/**
- * Show temporary notification to user
- */
-function showNotification(message, type = 'info') {
-    // Remove existing notification
-    const existing = document.getElementById('fast-autofill-notification');
-    if (existing) existing.remove();
-
-    // Create notification element
-    const notification = document.createElement('div');
-    notification.id = 'fast-autofill-notification';
-    notification.textContent = message;
-    notification.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: ${type === 'success' ? '#10b981' : type === 'error' ? '#ef4444' : '#3b82f6'};
-    color: white;
-    padding: 12px 24px;
-    border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 14px;
-    font-weight: 500;
-    animation: slideIn 0.3s ease-out;
-  `;
-
-    // Add animation
-    const style = document.createElement('style');
-    style.textContent = `
-    @keyframes slideIn {
-      from { transform: translateX(100%); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
-    }
-  `;
-    document.head.appendChild(style);
-
-    document.body.appendChild(notification);
-
-    // Auto-remove after 3 seconds
-    setTimeout(() => {
-        notification.style.animation = 'slideIn 0.3s ease-out reverse';
-        setTimeout(() => notification.remove(), 300);
-    }, 3000);
-}
-
-/**
- * Detect separate pilgrim sections on TTD page
- * Returns array of container elements, one for each pilgrim
- */
-function detectPilgrimSections() {
-    const sections = [];
-
-    // Look for sections containing name/age/gender fields
-    // TTD typically groups pilgrim fields in parent divs
-    const allInputs = document.querySelectorAll('input[name*="name"], input[name*="fname"]');
-
-    allInputs.forEach(input => {
-        // Find the parent section (usually a div/form container)
-        const section = input.closest('div[class*="section"], div[class*="pilgrim"], div[class*="form"], form') || input.parentElement.parentElement;
-
-        // Only add unique sections
-        if (section && !sections.includes(section)) {
-            sections.push(section);
-        }
-    });
-
-    console.log(`🔍 Detected ${sections.length} pilgrim sections on page`);
-    return sections;
-}
-
-/**
- * NEW: Fill Master Profile (Multiple Pilgrims)
- * NOTE: Currently fills only first pilgrim. Multi-section detection coming in next update.
- */
-function autofillMasterProfile(masterProfile) {
-    console.log('⚡ FILLING MASTER PROFILE (MULTI-PILGRIM)...');
-    console.log('Master Profile:', masterProfile);
-    console.log('=====================================');
-
-    let filledCount = 0;
-    const startTime = performance.now();
-
-    // 1. Fill General Details (shared)
-    if (fillField('email', masterProfile.generalDetails.email)) filledCount++;
-    if (fillField('city', masterProfile.generalDetails.city)) filledCount++;
-    if (fillField('state', masterProfile.generalDetails.state)) filledCount++;
-    if (fillField('country', masterProfile.generalDetails.country)) filledCount++;
-    if (fillField('pincode', masterProfile.generalDetails.pincode)) filledCount++;
-
-    // 2. Detect pilgrim sections
-    const pilgrimSections = detectPilgrimSections();
-
-    // 3. Fill each pilgrim into their specific section
-    // 3. Fill pilgrims - HYBRID: ID selectors OR pattern matching
-    masterProfile.pilgrims.forEach((pilgrim, index) => {
-        setTimeout(() => {
-            console.log(`▶️ Pilgrim ${index + 1}`);
-
-            // Try ID-based first (darshan pages: id="0", id="1")
-            const idField = document.querySelector(`input[name="fname"][id="${index}"]`);
-
-            if (idField) {
-                // ID-based approach (darshan booking)
-                console.log(`  ✓ ID-based (id="${index}")`);
-                const f = {
-                    name: document.querySelector(`input[name="fname"][id="${index}"]`),
-                    age: document.querySelector(`input[name="age"][id="${index}"]`),
-                    gender: document.querySelector(`input[name="gender"][id="${index}"]`),
-                    idType: document.querySelector(`input[name="photoIdType"][id="${index}"]`),
-                    idNum: document.querySelector(`input[name="idProofNumber"][id="${index}"]`)
-                };
-                if (f.name) setNativeValue(f.name, pilgrim.fullName);
-                if (f.age) setNativeValue(f.age, pilgrim.age);
-                if (f.gender) setNativeValue(f.gender, pilgrim.gender);
-                setTimeout(() => {
-                    if (f.gender) fillAngularMaterialDropdown(f.gender, pilgrim.gender);
-                    setTimeout(() => {
-                        if (f.idType) fillAngularMaterialDropdown(f.idType, pilgrim.idType);
-                        setTimeout(() => { if (f.idNum) setNativeValue(f.idNum, pilgrim.idNumber); }, 400);
-                    }, 600);
-                }, 200);
-            } else {
-                // Pattern-based approach (other TTD pages)
-                console.log(`  ✓ Pattern-based`);
-                const sections = detectPilgrimSections();
-                const section = sections[index] || document;
-
-                fillField('fullName', pilgrim.fullName, section);
-                fillField('age', pilgrim.age, section);
-                fillField('gender', pilgrim.gender, section);
-
-                setTimeout(() => {
-                    // Find gender field and trigger dropdown
-                    const genderInput = section.querySelector('input[name*="gender"], input[formcontrolname*="gender"]');
-                    if (genderInput) fillAngularMaterialDropdown(genderInput, pilgrim.gender);
-
-                    setTimeout(() => {
-                        // Find Photo ID Type field and trigger dropdown
-                        const idTypeInput = section.querySelector('input[name*="photoIdType"], input[name*="idType"], input[formcontrolname*="idType"]');
-                        if (idTypeInput) {
-                            fillAngularMaterialDropdown(idTypeInput, pilgrim.idType);
-                            setTimeout(() => {
-                                fillField('idNumber', pilgrim.idNumber, section);
-                            }, 400);
-                        }
-                    }, 600);
-                }, 200);
+            const opt = matchOption(options, wanted);
+            if (!opt) {
+                LOG(`No option matching "${wanted}". Options:`, options.map((o) => o.textContent.trim()));
+                await realClick(input); // close it again
+                return 'nomatch';
             }
-        }, index * 2000);
-    });
-
-    // Count fields
-    filledCount += (masterProfile.pilgrims.length * 4);
-
-    const endTime = performance.now();
-    const duration = Math.round(endTime - startTime);
-
-    console.log('=====================================');
-    console.log(`✅ Master profile: ${filledCount} fields in ${duration}ms`);
-
-    showNotification(`✓ Filling ${masterProfile.pilgrims.length} pilgrims...`, 'success');
-    return filledCount;
-}
-/**
- * Listen for messages from background script or popup
- */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'fillForm' && message.profile) {
-        try {
-            const count = autofillForm(message.profile.data);
-            sendResponse({ success: true, filledCount: count });
-        } catch (error) {
-            console.error('Autofill error:', error);
-            showNotification('❌ Autofill failed', 'error');
-            sendResponse({ success: false, error: error.message });
+            const optText = opt.textContent.trim();
+            opt.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+            await realClick(opt);
+            if (await waitFor(() => norm(input.value) === norm(optText), 800)) return 'ok';
         }
-    } else if (message.action === 'fillMasterProfile' && message.masterProfile) {
-        // NEW: Master profile fill (multi-pilgrim)
-        try {
-            const count = autofillMasterProfile(message.masterProfile);
-            sendResponse({ success: true, filledCount: count });
-        } catch (error) {
-            console.error('Master autofill error:', error);
-            showNotification('❌ Master autofill failed', 'error');
-            sendResponse({ success: false, error: error.message });
+        return 'failed';
+    }
+
+    // ------------------------------------------------------------------
+    // Locating fields
+    // ------------------------------------------------------------------
+    const byName = (name, idx) => {
+        const els = [...document.querySelectorAll(`input[name="${name}"][id="${idx}"], select[name="${name}"][id="${idx}"]`)];
+        return els.find(isVisible) || els[0] || null;
+    };
+
+    function attrsOf(el) {
+        return [el.name, el.id, el.placeholder, el.getAttribute('aria-label'),
+            el.getAttribute('formcontrolname'), el.getAttribute('ng-reflect-name')]
+            .filter(Boolean).join(' ').toLowerCase();
+    }
+
+    function nthByPattern(type, n) {
+        const pats = FIELD_PATTERNS[type];
+        const els = [...document.querySelectorAll(
+            'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]), select, textarea'
+        )].filter((el) => isVisible(el) && pats.some((p) => attrsOf(el).includes(p)));
+        return els[n] || null;
+    }
+
+    function pilgrimField(type, i) {
+        const ttdName = { fullName: 'fname', age: 'age', gender: 'gender', idType: 'photoIdType', idNumber: 'idProofNumber', gothram: 'gothram' }[type];
+        return byName(ttdName, i) || nthByPattern(type, i);
+    }
+
+    function generalField(type) {
+        const ttdName = { email: 'emailId', city: 'city', state: 'state', pincode: 'pincode' }[type];
+        const el = [...document.querySelectorAll(`input[name="${ttdName}"]`)].find(isVisible);
+        return el || nthByPattern(type, 0);
+    }
+
+    function countPilgrimRows() {
+        const rows = [...document.querySelectorAll('input[name="fname"]')].filter(isVisible).length;
+        return rows || [...document.querySelectorAll('input')].filter((el) => isVisible(el) && FIELD_PATTERNS.fullName.some((p) => attrsOf(el).includes(p))).length;
+    }
+
+    // ------------------------------------------------------------------
+    // Profiles
+    // ------------------------------------------------------------------
+    function normalizeProfile(p) {
+        if (Array.isArray(p?.pilgrims)) {
+            return { name: p.name || 'Profile', general: p.generalDetails || {}, pilgrims: p.pilgrims };
+        }
+        const d = p?.data || p || {};
+        return {
+            name: p?.name || d.fullName || 'Profile',
+            general: { email: d.email, city: d.city, state: d.state, pincode: d.pincode },
+            pilgrims: [{ fullName: d.fullName, age: d.age, gender: d.gender, idType: d.idType, idNumber: d.idNumber, gothram: d.gothram }]
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Fill engine
+    // ------------------------------------------------------------------
+    let running = null;
+
+    async function doStep(job, label, getEl, action) {
+        if (job.cancelled) return;
+        const el = getEl();
+        const entry = { label, getEl, action, status: 'nofield' };
+        if (el) {
+            try {
+                entry.status = await action(el);
+            } catch (e) {
+                if (/context invalidated/i.test(e.message)) throw e;
+                LOG(`${label} error:`, e);
+                entry.status = 'failed';
+            }
+        }
+        job.results.push(entry);
+    }
+
+    async function fillPilgrim(job, p, i) {
+        const L = (s) => `Pilgrim ${i + 1} ${s}`;
+        const idType = normIdType(p.idType);
+        await doStep(job, L('name'), () => pilgrimField('fullName', i), (el) => typeValue(el, clean.name(p.fullName)));
+        await doStep(job, L('age'), () => pilgrimField('age', i), (el) => typeValue(el, clean.age(p.age)));
+        await doStep(job, L('gender'), () => pilgrimField('gender', i), (el) => chooseOption(el, normGender(p.gender)));
+        await doStep(job, L('photo ID type'), () => pilgrimField('idType', i), (el) => chooseOption(el, idType));
+        // The ID number box is disabled until an ID type is picked; typeValue waits for it.
+        await doStep(job, L('ID number'), () => pilgrimField('idNumber', i), (el) => typeValue(el, cleanIdNumber(idType, p.idNumber)));
+        if (p.gothram) {
+            await doStep(job, L('gothram'), () => byName('gothram', i) || nthByPattern('gothram', i), (el) => typeValue(el, clean.letters(p.gothram)));
         }
     }
-    return true; // Keep channel open for async response
-});
 
-// MutationObserver to handle dynamically loaded forms
-const observer = new MutationObserver((mutations) => {
-    // We don't auto-fill on mutation, just log that DOM changed
-    // User must explicitly trigger fill
-});
+    async function fillGeneral(job, g) {
+        await doStep(job, 'Email', () => generalField('email'), (el) => typeValue(el, clean.text(g.email)));
+        await doStep(job, 'City', () => generalField('city'), (el) => (el.disabled && el.value ? 'ok' : typeValue(el, clean.letters(g.city))));
+        await doStep(job, 'State', () => generalField('state'), (el) => (el.disabled && el.value ? 'ok' : typeValue(el, clean.letters(g.state))));
+        await doStep(job, 'Pincode', () => generalField('pincode'), (el) => typeValue(el, clean.digits(g.pincode).slice(0, 6)));
+    }
 
-observer.observe(document.body, {
-    childList: true,
-    subtree: true
-});
+    const isProblem = (s) => s === 'failed' || s === 'nomatch' || s === 'disabled';
 
-// Expose debug function globally for easy access
-window.detectTTDFields = detectAllFields;
+    async function runFill(rawProfile) {
+        if (running) {
+            ui.show('Already filling — please wait (Esc to cancel)', 'info');
+            return;
+        }
+        const profile = normalizeProfile(rawProfile);
+        const job = { cancelled: false, results: [] };
+        running = job;
+        clearHighlights();
+        const t0 = performance.now();
 
-console.log('⚡ Fast Autofill Extension Loaded!');
-console.log('=====================================');
-console.log('📋 To see all fields on this page, open Console and type:');
-console.log('   detectTTDFields()');
-console.log('=====================================');
-console.log('✅ Ready to autofill - click extension or press Ctrl+Shift+1');
+        try {
+            const rows = countPilgrimRows();
+            if (!rows && !generalField('email')) {
+                ui.show('No pilgrim form found on this page. Open the Pilgrim Details page first.', 'error');
+                return;
+            }
+
+            ui.show(`Filling "${profile.name}"…`, 'progress');
+            await bridge.start();
+
+            const total = profile.pilgrims.length;
+            const fillCount = Math.min(total, rows || total);
+            for (let i = 0; i < fillCount && !job.cancelled; i++) {
+                ui.show(`Filling pilgrim ${i + 1} of ${fillCount}…`, 'progress');
+                await fillPilgrim(job, profile.pilgrims[i], i);
+            }
+            if (!job.cancelled) {
+                ui.show('Filling general details…', 'progress');
+                await fillGeneral(job, profile.general || {});
+            }
+
+            // Verify + one retry pass for anything that didn't stick
+            const retry = job.results.filter((r) => isProblem(r.status));
+            for (const r of retry) {
+                if (job.cancelled) break;
+                const el = r.getEl();
+                if (!el) continue;
+                try { r.status = await r.action(el); } catch (_) { /* keep failed */ }
+            }
+
+            const secs = ((performance.now() - t0) / 1000).toFixed(1);
+            const problems = job.results.filter((r) => isProblem(r.status));
+            const missing = job.results.filter((r) => r.status === 'nofield' && /name|age/.test(r.label));
+            const filled = job.results.filter((r) => r.status === 'ok').length;
+
+            if (job.cancelled) {
+                ui.show(`Cancelled — ${filled} fields filled`, 'info');
+            } else if (problems.length) {
+                problems.forEach((r) => highlight(r.getEl()));
+                ui.show(`Filled ${filled} fields in ${secs}s. Please check: ${problems.map((r) => r.label).join(', ')}`, 'warn', 9000);
+            } else {
+                let msg = `✓ Filled ${fillCount} pilgrim${fillCount > 1 ? 's' : ''} (${filled} fields) in ${secs}s`;
+                if (total > fillCount) msg += ` — page has only ${fillCount} row${fillCount > 1 ? 's' : ''}, profile has ${total}`;
+                else if (missing.length) msg += ` — some fields not on this page`;
+                ui.show(msg, total > fillCount ? 'warn' : 'success', 6000);
+            }
+            LOG('Fill results:', job.results.map((r) => `${r.label}: ${r.status}`));
+        } catch (e) {
+            if (/context invalidated/i.test(e.message)) {
+                ui.show('Extension was updated — please refresh this page (F5) and try again.', 'error', 8000);
+            } else {
+                LOG('Fill error:', e);
+                ui.show(`Autofill error: ${e.message}`, 'error', 8000);
+            }
+        } finally {
+            await bridge.stop().catch(() => {});
+            running = null;
+        }
+    }
+
+    function highlight(el) {
+        if (!el) return;
+        el.dataset.ttdafHighlight = '1';
+        el.style.outline = '3px solid #ef4444';
+        el.style.outlineOffset = '2px';
+    }
+
+    function clearHighlights() {
+        document.querySelectorAll('[data-ttdaf-highlight]').forEach((el) => {
+            el.style.outline = '';
+            el.style.outlineOffset = '';
+            delete el.dataset.ttdafHighlight;
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Status toast (shadow DOM so the page's CSS can't interfere)
+    // ------------------------------------------------------------------
+    const ui = (() => {
+        let host, box, timer;
+        const colors = { success: '#10b981', error: '#ef4444', warn: '#d97706', info: '#3b82f6', progress: '#FF9933' };
+        function ensure() {
+            if (host?.isConnected) return;
+            host = document.createElement('div');
+            host.id = 'ttdaf-toast-host';
+            const root = host.attachShadow({ mode: 'open' });
+            root.innerHTML = `<style>
+                .t{position:fixed;top:16px;right:16px;max-width:380px;z-index:2147483647;color:#fff;
+                   padding:12px 16px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.25);
+                   font:500 14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                   transition:opacity .2s;cursor:pointer}
+                .h{font-weight:700;font-size:12px;opacity:.85;margin-bottom:2px;letter-spacing:.3px}
+            </style><div class="t"><div class="h">TTD AUTOFILL</div><div class="m"></div></div>`;
+            box = root.querySelector('.t');
+            box.addEventListener('click', () => { host.remove(); });
+            document.documentElement.appendChild(host);
+        }
+        return {
+            show(msg, type = 'info', ms = 0) {
+                ensure();
+                clearTimeout(timer);
+                box.style.opacity = '1';
+                box.style.background = colors[type] || colors.info;
+                box.querySelector('.m').textContent = msg;
+                const life = ms || (type === 'progress' ? 0 : 4000);
+                if (life) timer = setTimeout(() => host?.remove(), life);
+            }
+        };
+    })();
+
+    // ------------------------------------------------------------------
+    // Booking clock — a display-only clock synced to TTD's own server time.
+    // It does NOT click, navigate, retry, or submit anything. It only shows the
+    // true time and a countdown so you click once, yourself, at the right second.
+    // ------------------------------------------------------------------
+    const bookingClock = (() => {
+        let host, root, pill, enabled = false, openHHMM = '10:00';
+        let skewMs = 0, synced = false, tick = null, resyncAt = 0, syncing = false;
+        let audioCtx = null, soundOn = true, prevSecondsLeft = null, prevDiff = null, gestureHooked = false;
+        const pad = (n) => String(n).padStart(2, '0');
+
+        // Audio needs a prior user gesture to be allowed; unlock on the first click/keypress.
+        function hookGesture() {
+            if (gestureHooked) return;
+            gestureHooked = true;
+            const unlock = () => {
+                try {
+                    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                } catch (_) { /* audio unavailable */ }
+            };
+            window.addEventListener('pointerdown', unlock, { capture: true });
+            window.addEventListener('keydown', unlock, { capture: true });
+        }
+
+        function beep(freq, durMs, vol = 0.25) {
+            if (!soundOn) return;
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = freq;
+                const t = audioCtx.currentTime;
+                gain.gain.setValueAtTime(0.0001, t);
+                gain.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+                gain.gain.exponentialRampToValueAtTime(0.0001, t + durMs / 1000);
+                osc.connect(gain).connect(audioCtx.destination);
+                osc.start(t);
+                osc.stop(t + durMs / 1000 + 0.02);
+            } catch (_) { /* ignore */ }
+        }
+
+        // Read TTD's server clock from the Date response header (same-origin, so it's readable).
+        async function sync() {
+            if (syncing) return;
+            syncing = true;
+            try {
+                const t0 = Date.now();
+                const res = await fetch('/', { method: 'HEAD', cache: 'no-store' });
+                const t1 = Date.now();
+                const dateHeader = res.headers.get('date');
+                if (dateHeader) {
+                    const serverMs = new Date(dateHeader).getTime();
+                    // Header has 1s resolution; assume it reflects the server mid-way through the round trip.
+                    skewMs = serverMs - (t0 + (t1 - t0) / 2);
+                    synced = true;
+                    resyncAt = Date.now() + 60000; // re-sync once a minute
+                }
+            } catch (_) {
+                // Keep the last known skew; the local clock still ticks.
+            } finally {
+                syncing = false;
+            }
+        }
+
+        const serverNow = () => Date.now() + skewMs;
+
+        // Next occurrence of the opening time, in the viewer's local timezone (IST for this user).
+        function targetMs() {
+            const [h, m] = openHHMM.split(':').map(Number);
+            const base = new Date(serverNow());
+            const t = new Date(base);
+            t.setHours(h, m, 0, 0);
+            return t.getTime();
+        }
+
+        function render() {
+            if (!host) return;
+            if (!synced && Date.now() > resyncAt) sync();
+            if (Date.now() > resyncAt) sync();
+
+            const now = serverNow();
+            const d = new Date(now);
+            root.querySelector('.clk-time').textContent =
+                `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+            root.querySelector('.clk-sync').textContent = synced ? 'TTD server time' : 'syncing…';
+
+            const diff = targetMs() - now;
+            const cd = root.querySelector('.clk-cd');
+            if (!openHHMM) { cd.textContent = ''; prevDiff = diff; return; }
+            if (diff > 0) {
+                const s = Math.floor(diff / 1000);
+                const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+                cd.textContent = `Opens in ${hh > 0 ? hh + ':' : ''}${pad(mm)}:${pad(ss)}`;
+                cd.className = 'clk-cd ' + (s <= 10 ? 'soon' : '');
+                pill.classList.remove('go');
+            } else if (diff > -4000) {
+                cd.textContent = 'GO — click now';
+                pill.classList.add('go');
+            } else {
+                cd.textContent = 'Open — one click, then wait (don’t press Back)';
+                pill.classList.remove('go');
+            }
+
+            // 3-2-1 beep, then a higher GO tone at zero. Only when we've watched it count down
+            // (prev values set), so enabling the clock after open doesn't blast a beep.
+            const secondsLeft = Math.ceil(diff / 1000);
+            if (prevSecondsLeft != null && prevDiff != null) {
+                if (diff > 0 && secondsLeft < prevSecondsLeft && secondsLeft >= 1 && secondsLeft <= 3) {
+                    beep(880, 130); // tick
+                    LOG(`countdown ${secondsLeft}`);
+                } else if (prevDiff > 0 && diff <= 0) {
+                    beep(1320, 450, 0.3); // GO
+                    LOG('countdown GO');
+                }
+            }
+            prevSecondsLeft = secondsLeft;
+            prevDiff = diff;
+        }
+
+        function mount() {
+            if (host?.isConnected) return;
+            host = document.createElement('div');
+            host.id = 'ttdaf-clock-host';
+            root = host.attachShadow({ mode: 'open' });
+            root.innerHTML = `<style>
+                .clk{position:fixed;left:16px;bottom:16px;z-index:2147483646;min-width:150px;
+                     background:#233443;color:#fff;border-radius:12px;padding:10px 14px;
+                     box-shadow:0 6px 20px rgba(0,0,0,.3);font-family:-apple-system,'Segoe UI',sans-serif;
+                     border:2px solid transparent;user-select:none}
+                .clk.go{border-color:#10b981;animation:pulse .6s infinite alternate}
+                @keyframes pulse{from{box-shadow:0 0 0 0 rgba(16,185,129,.5)}to{box-shadow:0 0 0 8px rgba(16,185,129,0)}}
+                .clk-time{font-size:26px;font-weight:700;letter-spacing:1px;font-variant-numeric:tabular-nums;line-height:1}
+                .clk-sync{font-size:10px;opacity:.7;margin-top:2px;text-transform:uppercase;letter-spacing:.5px}
+                .clk-cd{font-size:13px;font-weight:600;margin-top:6px;color:#FFD700}
+                .clk-cd.soon{color:#FF9933;font-size:15px}
+                .clk.go .clk-cd{color:#10b981;font-size:16px}
+                .clk-x{position:absolute;top:4px;right:8px;cursor:pointer;opacity:.5;font-size:14px}
+                .clk-x:hover{opacity:1}
+                .clk-mute{position:absolute;top:4px;right:26px;cursor:pointer;opacity:.6;font-size:13px}
+                .clk-mute:hover{opacity:1}
+            </style>
+            <div class="clk">
+                <div class="clk-mute" title="Mute / unmute countdown beep">🔊</div>
+                <div class="clk-x" title="Hide">&times;</div>
+                <div class="clk-time">--:--:--</div>
+                <div class="clk-sync">syncing…</div>
+                <div class="clk-cd"></div>
+            </div>`;
+            pill = root.querySelector('.clk');
+            root.querySelector('.clk-x').addEventListener('click', () => hide(true));
+            root.querySelector('.clk-mute').addEventListener('click', (e) => {
+                soundOn = !soundOn;
+                e.currentTarget.textContent = soundOn ? '🔊' : '🔇';
+                if (soundOn) beep(660, 90, 0.15); // confirm it's audible
+            });
+            document.documentElement.appendChild(host);
+            hookGesture();
+            prevSecondsLeft = null;
+            prevDiff = null;
+            sync();
+            tick = setInterval(render, 200);
+            render();
+        }
+
+        function hide(userDismissed) {
+            if (tick) { clearInterval(tick); tick = null; }
+            host?.remove();
+            host = null;
+            if (userDismissed) ui.show('Booking clock hidden. Turn it back on from the extension popup.', 'info');
+        }
+
+        function apply(cfg) {
+            enabled = !!cfg?.enabled;
+            openHHMM = cfg?.open || '10:00';
+            if (enabled) { mount(); } else { hide(false); }
+        }
+
+        async function init() {
+            try {
+                const { bookingClock: cfg } = await chrome.storage.local.get('bookingClock');
+                apply(cfg);
+            } catch (_) { /* storage unavailable */ }
+            chrome.storage.onChanged.addListener((changes, area) => {
+                if (area === 'local' && changes.bookingClock) apply(changes.bookingClock.newValue);
+            });
+        }
+        return { init };
+    })();
+
+    // ------------------------------------------------------------------
+    // Shortcuts & messages
+    // ------------------------------------------------------------------
+    async function getAllProfiles() {
+        const d = await chrome.storage.local.get(['singleProfiles', 'masterProfiles', 'profiles', 'lastUsedProfile']);
+        return d;
+    }
+
+    async function recordUse(profile) {
+        try {
+            const d = await chrome.storage.local.get(['singleProfiles', 'masterProfiles']);
+            const bump = (list) => (list || []).map((p) => (p.id === profile.id
+                ? { ...p, stats: { ...(p.stats || {}), useCount: (p.stats?.useCount || 0) + 1, lastUsed: Date.now() } }
+                : p));
+            await chrome.storage.local.set({
+                singleProfiles: bump(d.singleProfiles),
+                masterProfiles: bump(d.masterProfiles),
+                lastUsedProfile: profile
+            });
+        } catch (_) { /* stats are best-effort */ }
+    }
+
+    async function fillByShortcut(shortcut) {
+        try {
+            const d = await getAllProfiles();
+            const all = [...(d.masterProfiles || []), ...(d.singleProfiles || []), ...(d.profiles || [])];
+            const match = all.find((p) => String(p.shortcut || '').toLowerCase() === shortcut);
+            if (!match) {
+                ui.show(`No profile assigned to ${shortcut.toUpperCase()}. Set one in the extension popup.`, 'info');
+                return;
+            }
+            LOG(`Shortcut ${shortcut} -> "${match.name}"`);
+            recordUse(match);
+            await runFill(match);
+        } catch (e) {
+            if (/context invalidated/i.test(e.message)) {
+                ui.show('Extension was updated — please refresh this page (F5) and try again.', 'error', 8000);
+            } else {
+                ui.show(`Autofill error: ${e.message}`, 'error');
+            }
+        }
+    }
+
+    window.addEventListener('keydown', function onKey(e) {
+        if (!e.isTrusted) return;
+        if (!isCurrent()) {
+            const newerCopyPresent = document.documentElement.dataset.ttdafInstance !== INSTANCE;
+            if (newerCopyPresent) {
+                window.removeEventListener('keydown', onKey, true); // step aside for the new copy
+            } else if (/^(?:Digit|Numpad)[1-9]$/.test(e.code) && e.ctrlKey && (e.altKey || e.shiftKey)) {
+                ui.show('Extension was updated — please refresh this page (F5) and try again.', 'error', 8000);
+            }
+            return;
+        }
+
+        if (e.key === 'Escape' && running) {
+            running.cancelled = true;
+            return;
+        }
+
+        // Use e.code: with Shift held, e.key for "1" is "!" (that broke Ctrl+Shift shortcuts before)
+        const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
+        if (!m || e.metaKey) return;
+        let shortcut = null;
+        if (e.ctrlKey && e.altKey && !e.shiftKey) shortcut = `ctrl+alt+${m[1]}`;
+        else if (e.ctrlKey && e.shiftKey && !e.altKey) shortcut = `ctrl+shift+${m[1]}`;
+        if (!shortcut) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        fillByShortcut(shortcut);
+    }, true);
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (!isCurrent()) return;
+        switch (message?.action) {
+            case 'ping':
+                sendResponse({ ok: true });
+                return;
+            case 'fillForm':
+                if (message.profile) runFill(message.profile);
+                sendResponse({ success: true, started: true });
+                return;
+            case 'fillMasterProfile':
+                if (message.masterProfile) runFill(message.masterProfile);
+                sendResponse({ success: true, started: true });
+                return;
+            case 'fillLastUsed':
+                getAllProfiles().then((d) => {
+                    if (d.lastUsedProfile) runFill(d.lastUsedProfile);
+                    else ui.show('No recently used profile yet — fill once from the popup first.', 'info');
+                });
+                sendResponse({ success: true, started: true });
+                return;
+            case 'detectFields':
+                sendResponse({ fields: detectAllFields() });
+                return;
+        }
+    });
+
+    // Debug helper: in DevTools console pick the "TTD Fast Autofill" context, then run detectTTDFields()
+    function detectAllFields() {
+        const info = [...document.querySelectorAll('input, select, textarea')].map((f, i) => ({
+            index: i + 1, tag: f.tagName.toLowerCase(), type: f.type, name: f.name, id: f.id,
+            value: f.value, disabled: f.disabled, readOnly: f.readOnly, visible: isVisible(f), className: f.className
+        }));
+        console.table(info);
+        return info;
+    }
+    window.detectTTDFields = detectAllFields;
+
+    if (isCurrent()) bookingClock.init();
+
+    LOG('Ready. Use your Ctrl+Alt+<1-9> / Ctrl+Shift+<1-9> shortcut on the Pilgrim Details page.');
+})();

@@ -180,6 +180,17 @@
                     </div>
 
                     <div class="setting-group">
+                        <label class="setting-label">
+                            <input type="checkbox" id="clockEnabled">
+                            <span>Show booking clock on TTD pages</span>
+                        </label>
+                        <p class="setting-desc">A clock synced to TTD's own server time, with a countdown to the
+                            opening time. Click the service once at 0, then wait — do not press Back.</p>
+                        <label class="setting-label" for="clockOpenTime" style="margin-top:8px">Opening time (24h)</label>
+                        <input type="time" id="clockOpenTime" value="10:00" class="form-input" style="max-width:140px">
+                    </div>
+
+                    <div class="setting-group">
                         <label class="setting-label">Keyboard Shortcuts</label>
                         <div class="shortcut-list">
                             <div class="shortcut-item">
@@ -241,6 +252,15 @@
                             <li>📥 Import/Export to backup your data</li>
                             <li>⌨️ Use keyboard shortcuts for speed</li>
                         </ul>
+                    </div>
+
+                    <div class="help-section">
+                        <h3>Fast Fill Mode</h3>
+                        <p>The TTD site only accepts real typing and clicks, so the extension types for you
+                            through Chrome's debugger. While it fills (about a second), Chrome shows a bar saying
+                            <em>"TTD Fast Autofill started debugging this browser"</em>. This is expected. Don't
+                            click Cancel on it.</p>
+                        <p>Press <kbd>Esc</kbd> to stop a fill. Any field that couldn't be filled is outlined in red.</p>
                     </div>
                 </div>
             </div>

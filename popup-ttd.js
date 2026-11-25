@@ -21,6 +21,15 @@ async function init() {
     setupKeyboardShortcuts();
     renderProfiles();
 
+    // Opened via Ctrl+Shift+M / Ctrl+Shift+S command: jump to the requested tab
+    try {
+        const { popupView } = await chrome.storage.session.get('popupView');
+        if (popupView) {
+            switchView(popupView);
+            await chrome.storage.session.remove('popupView');
+        }
+    } catch (_) { /* session storage unavailable */ }
+
     // Auto-fill with last used if enabled
     if (settings.autoFillLastUsed && lastUsedProfile) {
         showToast('Press Ctrl+Shift+F to fill with last used profile', 'info');
@@ -82,6 +91,10 @@ function setupEventListeners() {
     });
     document.getElementById('clearAllData').addEventListener('click', clearAllData);
 
+    // Booking clock settings
+    document.getElementById('clockEnabled').addEventListener('change', saveBookingClock);
+    document.getElementById('clockOpenTime').addEventListener('change', saveBookingClock);
+
     // Help modal
     document.getElementById('closeHelp').addEventListener('click', () => closeModal('helpModal'));
 
@@ -128,14 +141,16 @@ function setupKeyboardShortcuts() {
         }
 
         // Custom Profile Shortcuts (Ctrl+Alt+1-9, Ctrl+Shift+1-9)
-        if (e.key >= '1' && e.key <= '9') {
+        // Use e.code: with Shift held, e.key for "1" is "!" so Ctrl+Shift shortcuts never matched.
+        const digit = /^(?:Digit|Numpad)([1-9])$/.exec(e.code)?.[1];
+        if (digit) {
             let shortcut = '';
 
             if (e.ctrlKey && e.altKey && !e.shiftKey) {
-                shortcut = `ctrl+alt+${e.key}`;
+                shortcut = `ctrl+alt+${digit}`;
                 e.preventDefault();
-            } else if (e.ctrlKey && e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
-                shortcut = `ctrl+shift+${e.key}`;
+            } else if (e.ctrlKey && e.shiftKey && !e.altKey) {
+                shortcut = `ctrl+shift+${digit}`;
                 e.preventDefault();
             }
 
@@ -194,9 +209,11 @@ function renderMasterProfiles() {
             <div class="empty-state">
                 <div class="empty-state-icon">📋</div>
                 <div class="empty-state-text">No master profiles yet</div>
-                <button class="btn-primary btn-sm" onclick="document.getElementById('newMasterBtn').click()">Create Your First Profile</button>
+                <button class="btn-primary btn-sm empty-create-btn">Create Your First Profile</button>
             </div>
         `;
+        // No inline onclick: extension pages block inline handlers (CSP)
+        container.querySelector('.empty-create-btn').addEventListener('click', () => openEditor('master'));
         return;
     }
 
@@ -213,9 +230,10 @@ function renderSingleProfiles() {
             <div class="empty-state">
                 <div class="empty-state-icon">👤</div>
                 <div class="empty-state-text">No single profiles yet</div>
-                <button class="btn-primary btn-sm" onclick="document.getElementById('newSingleBtn').click()">Create Your First Profile</button>
+                <button class="btn-primary btn-sm empty-create-btn">Create Your First Profile</button>
             </div>
         `;
+        container.querySelector('.empty-create-btn').addEventListener('click', () => openEditor('single'));
         return;
     }
 
@@ -398,7 +416,14 @@ async function fillProfile(profile) {
             ? { action: 'fillMasterProfile', masterProfile: profile }
             : { action: 'fillForm', profile: profile };
 
-        await chrome.tabs.sendMessage(tab.id, message);
+        try {
+            await chrome.tabs.sendMessage(tab.id, message);
+        } catch (err) {
+            // Page was opened before the extension loaded/updated: inject the script and retry.
+            if (!/Receiving end does not exist|Could not establish connection/i.test(err.message)) throw err;
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+            await chrome.tabs.sendMessage(tab.id, message);
+        }
 
         // Update stats
         profile.stats = profile.stats || {};
@@ -466,7 +491,7 @@ function generateShortcutOptions(modifier, currentShortcut) {
         const shortcutKey = `${modifier}+${i}`;
         const isUsed = usedShortcuts.has(shortcutKey);
         const isSelected = currentShortcut?.toLowerCase() === shortcutKey;
-        const label = modifier === 'ctrl' ? `Ctrl+${i}` : `Alt+${i}`;
+        const label = modifier === 'ctrl+shift' ? `Ctrl+Shift+${i}` : `Ctrl+Alt+${i}`;
 
         if (isUsed && !isSelected) {
             options += `<option value="${shortcutKey}" disabled>${label} (Used)</option>`;
@@ -658,10 +683,15 @@ function generatePilgrimFields(count) {
         container.innerHTML += `
             <div class="pilgrim-section">
                 <h4>Pilgrim ${i + 1}</h4>
-                
+
                 <div class="form-group">
                     <label class="form-label">Full Name *</label>
                     <input type="text" class="form-input pilgrim-name" data-index="${i}" value="${escapeHtml(pilgrim.fullName || '')}" required>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Gothram (Optional)</label>
+                    <input type="text" class="form-input pilgrim-gothram" data-index="${i}" value="${escapeHtml(pilgrim.gothram || '')}" placeholder="e.g. Bharadwaja">
                 </div>
                 
                 <div class="form-row">
@@ -755,6 +785,7 @@ async function saveMasterProfile() {
     for (let i = 0; i < count; i++) {
         profile.pilgrims.push({
             fullName: document.querySelector(`.pilgrim-name[data-index="${i}"]`).value,
+            gothram: document.querySelector(`.pilgrim-gothram[data-index="${i}"]`).value,
             age: document.querySelector(`.pilgrim-age[data-index="${i}"]`).value,
             gender: document.querySelector(`.pilgrim-gender[data-index="${i}"]`).value,
             idType: document.querySelector(`.pilgrim-idtype[data-index="${i}"]`).value,
@@ -911,9 +942,23 @@ function getFilteredProfiles(profiles) {
 }
 
 // ===== SETTINGS =====
-function openSettings() {
+async function openSettings() {
     document.getElementById('autoFillLastUsed').checked = settings.autoFillLastUsed;
+    try {
+        const { bookingClock } = await chrome.storage.local.get('bookingClock');
+        document.getElementById('clockEnabled').checked = !!bookingClock?.enabled;
+        document.getElementById('clockOpenTime').value = bookingClock?.open || '10:00';
+    } catch (_) { /* ignore */ }
     openModal('settingsModal');
+}
+
+async function saveBookingClock() {
+    const cfg = {
+        enabled: document.getElementById('clockEnabled').checked,
+        open: document.getElementById('clockOpenTime').value || '10:00'
+    };
+    await chrome.storage.local.set({ bookingClock: cfg });
+    showToast(cfg.enabled ? '🕑 Booking clock on — open a TTD page to see it' : 'Booking clock off', 'success');
 }
 
 async function clearAllData() {
