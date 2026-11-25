@@ -410,6 +410,7 @@
                 if (total > fillCount) msg += ` — page has only ${fillCount} row${fillCount > 1 ? 's' : ''}, profile has ${total}`;
                 else if (missing.length) msg += ` — some fields not on this page`;
                 ui.show(msg, total > fillCount ? 'warn' : 'success', 6000);
+                flashPrimaryAction(); // guide the eye to Continue (does NOT click it)
             }
             LOG('Fill results:', job.results.map((r) => `${r.label}: ${r.status}`));
         } catch (e) {
@@ -423,6 +424,25 @@
             await bridge.stop().catch(() => {});
             running = null;
         }
+    }
+
+    // After a clean fill, scroll the Continue/Pay button into view and pulse it so you can
+    // click it immediately. It never clicks the button — you press it yourself.
+    function flashPrimaryAction() {
+        try {
+            const btns = [...document.querySelectorAll('button, [role="button"], a')]
+                .filter((el) => isVisible(el) && /\b(continue|proceed|pay\s*now|submit|next)\b/i.test((el.textContent || '').trim()) && !/back|cancel/i.test(el.textContent || ''));
+            const btn = btns[btns.length - 1];
+            if (!btn) return;
+            btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            const prev = btn.style.boxShadow;
+            let n = 0;
+            const iv = setInterval(() => {
+                btn.style.transition = 'box-shadow .25s';
+                btn.style.boxShadow = n % 2 ? '0 0 0 4px rgba(16,185,129,.65)' : '0 0 0 0 rgba(16,185,129,0)';
+                if (++n > 6) { clearInterval(iv); btn.style.boxShadow = prev; }
+            }, 300);
+        } catch (_) { /* non-critical */ }
     }
 
     function highlight(el) {
@@ -484,7 +504,15 @@
         let host, root, pill, enabled = false, openHHMM = '10:00';
         let skewMs = 0, synced = false, tick = null, resyncAt = 0, syncing = false;
         let audioCtx = null, soundOn = true, prevSecondsLeft = null, prevDiff = null, gestureHooked = false;
+        const firedNudges = new Set();
         const pad = (n) => String(n).padStart(2, '0');
+
+        // Readiness reminders before the opening time, so you're positioned and not mid-login.
+        const NUDGES = [
+            { s: 300, msg: '5 minutes to go — make sure you are logged in.' },
+            { s: 120, msg: '2 minutes — open the exact darshan page now.' },
+            { s: 30, msg: '30 seconds — hand on the mouse. Click once, then don’t press Back.' }
+        ];
 
         // Audio needs a prior user gesture to be allowed; unlock on the first click/keypress.
         function hookGesture() {
@@ -581,6 +609,18 @@
                 pill.classList.remove('go');
             }
 
+            // Readiness nudges at 5m / 2m / 30s (only while genuinely counting down to them).
+            if (prevDiff != null && diff > 0) {
+                for (const n of NUDGES) {
+                    if (!firedNudges.has(n.s) && prevDiff > n.s * 1000 && diff <= n.s * 1000) {
+                        firedNudges.add(n.s);
+                        ui.show(n.msg, 'warn', 6000);
+                        beep(520, 200, 0.2);
+                        LOG(`nudge ${n.s}`);
+                    }
+                }
+            }
+
             // 3-2-1 beep, then a higher GO tone at zero. Only when we've watched it count down
             // (prev values set), so enabling the clock after open doesn't blast a beep.
             const secondsLeft = Math.ceil(diff / 1000);
@@ -637,6 +677,7 @@
             hookGesture();
             prevSecondsLeft = null;
             prevDiff = null;
+            firedNudges.clear();
             sync();
             tick = setInterval(render, 200);
             render();
