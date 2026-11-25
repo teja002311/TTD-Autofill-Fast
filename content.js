@@ -410,7 +410,6 @@
                 if (total > fillCount) msg += ` — page has only ${fillCount} row${fillCount > 1 ? 's' : ''}, profile has ${total}`;
                 else if (missing.length) msg += ` — some fields not on this page`;
                 ui.show(msg, total > fillCount ? 'warn' : 'success', 6000);
-                flashPrimaryAction(); // guide the eye to Continue (does NOT click it)
             }
             LOG('Fill results:', job.results.map((r) => `${r.label}: ${r.status}`));
         } catch (e) {
@@ -424,25 +423,6 @@
             await bridge.stop().catch(() => {});
             running = null;
         }
-    }
-
-    // After a clean fill, scroll the Continue/Pay button into view and pulse it so you can
-    // click it immediately. It never clicks the button — you press it yourself.
-    function flashPrimaryAction() {
-        try {
-            const btns = [...document.querySelectorAll('button, [role="button"], a')]
-                .filter((el) => isVisible(el) && /\b(continue|proceed|pay\s*now|submit|next)\b/i.test((el.textContent || '').trim()) && !/back|cancel/i.test(el.textContent || ''));
-            const btn = btns[btns.length - 1];
-            if (!btn) return;
-            btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
-            const prev = btn.style.boxShadow;
-            let n = 0;
-            const iv = setInterval(() => {
-                btn.style.transition = 'box-shadow .25s';
-                btn.style.boxShadow = n % 2 ? '0 0 0 4px rgba(16,185,129,.65)' : '0 0 0 0 rgba(16,185,129,0)';
-                if (++n > 6) { clearInterval(iv); btn.style.boxShadow = prev; }
-            }, 300);
-        } catch (_) { /* non-critical */ }
     }
 
     function highlight(el) {
